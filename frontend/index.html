@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>GoalVault Autopay — Reactive Demo Dashboard</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 760px; padding: 0 1rem; line-height: 1.5; }
+  h1 { font-size: 1.5rem; } .card { border: 1px solid #ddd; border-radius: 12px; padding: 1rem 1.25rem; margin: 1rem 0; }
+  .big { font-size: 1.8rem; font-weight: 700; } .muted { color: #666; } code { background: #f4f4f4; padding: 0 .3em; border-radius: 4px; }
+  .bar { height: 12px; background: #eee; border-radius: 6px; overflow: hidden; } .bar > div { height: 100%; background: #2f9e44; }
+  button { padding: .5rem 1rem; border-radius: 8px; border: 1px solid #ccc; background: #fff; cursor: pointer; }
+  input { width: 100%; padding: .4rem; margin: .2rem 0 .6rem; box-sizing: border-box; }
+  a { color: #1c6ed9; }
+</style>
+</head>
+<body>
+<h1>GoalVault Autopay</h1>
+<p class="muted">A savings goal on <b>Ethereum Sepolia</b> that pays itself out the moment it is fully
+funded — watched by a reactive contract on <b>Reactive Lasna</b>. No keeper, no bot, no button.
+Track: <b>Set It and Forget It</b> · Reactive Omni Buildathon.</p>
+
+<div class="card">
+  <label>GoalVault address (Sepolia)</label>
+  <input id="vault" placeholder="0x…" />
+  <label>GoalWatcher address (Lasna)</label>
+  <input id="watcher" placeholder="0x…" />
+  <label>Goal ID</label>
+  <input id="goalId" type="number" value="1" min="1" />
+  <button id="load">Load live state</button>
+  <span class="muted" id="hint">Tip: serve this folder next to <code>deployments.json</code> and the fields fill themselves.</span>
+</div>
+
+<div class="card" id="goalCard" hidden>
+  <div class="muted">Goal funding progress</div>
+  <div class="big"><span id="funded">–</span> / <span id="target">–</span> SepETH</div>
+  <div class="bar"><div id="barFill" style="width:0%"></div></div>
+  <p>Beneficiary: <code id="beneficiary">–</code><br/>
+     Status: <b id="status">–</b></p>
+  <p id="links"></p>
+</div>
+
+<div class="card" id="watcherCard" hidden>
+  <div class="muted">GoalWatcher on Lasna</div>
+  <p>Deposits observed (reactions): <b id="reactions">–</b><br/>
+     Release callbacks triggered: <b id="triggers">–</b></p>
+</div>
+
+<script>
+const SEPOLIA_RPC = "https://ethereum-sepolia-rpc.publicnode.com";
+const LASNA_RPC = "https://lasna-rpc.rnk.dev/";
+
+// Minimal ABI encoding helpers (no external libraries).
+const enc = {
+  addr: (a) => a.toLowerCase().replace("0x", "").padStart(64, "0"),
+  uint: (n) => BigInt(n).toString(16).padStart(64, "0"),
+};
+// Function selectors, verified against the compiled artifacts with `cast sig`.
+const SEL = {
+  getGoal: "0xdf6ed6cb",   // getGoal(uint256)
+  reactions: "0xffa46acd", // reactions()
+  triggers: "0x7bbb19dc",  // triggers()
+};
+
+async function rpc(url, method, params) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+  });
+  const json = await res.json();
+  if (json.error) throw new Error(json.error.message);
+  return json.result;
+}
+const call = (url, to, data) => rpc(url, "eth_call", [{ to, data }, "latest"]);
+const word = (hex, i) => hex.slice(2 + i * 64, 2 + (i + 1) * 64);
+const asUint = (w) => BigInt("0x" + w);
+const asAddr = (w) => "0x" + w.slice(24);
+const asBool = (w) => asUint(w) !== 0n;
+const eth = (wei) => (Number(wei) / 1e18).toFixed(4);
+
+async function load() {
+  const vault = document.getElementById("vault").value.trim();
+  const watcher = document.getElementById("watcher").value.trim();
+  const goalId = document.getElementById("goalId").value || "1";
+  if (vault) {
+    const data = await call(SEPOLIA_RPC, vault, SEL.getGoal + enc.uint(goalId));
+    const funded = asUint(word(data, 3));
+    const target = asUint(word(data, 2));
+    document.getElementById("funded").textContent = eth(funded);
+    document.getElementById("target").textContent = eth(target);
+    document.getElementById("beneficiary").textContent = asAddr(word(data, 1));
+    const released = asBool(word(data, 4));
+    const cancelled = asBool(word(data, 5));
+    document.getElementById("status").textContent = released ? "RELEASED — paid out automatically" : cancelled ? "cancelled" : "funding in progress";
+    document.getElementById("barFill").style.width = target > 0n ? `${Math.min(100, Number((funded * 100n) / target))}%` : "0%";
+    document.getElementById("links").innerHTML =
+      `<a href="https://sepolia.etherscan.io/address/${vault}" target="_blank">Vault on Sepolia Etherscan</a>`;
+    document.getElementById("goalCard").hidden = false;
+  }
+  if (watcher) {
+    const r = await call(LASNA_RPC, watcher, SEL.reactions);
+    const t = await call(LASNA_RPC, watcher, SEL.triggers);
+    document.getElementById("reactions").textContent = asUint(r.slice(2).padStart(64, "0")).toString();
+    document.getElementById("triggers").textContent = asUint(t.slice(2).padStart(64, "0")).toString();
+    document.getElementById("watcherCard").hidden = false;
+  }
+}
+
+document.getElementById("load").addEventListener("click", () => load().catch((e) => alert(e.message)));
+
+// Auto-fill from deployments.json when served alongside it.
+fetch("../deployments.json")
+  .then((r) => (r.ok ? r.json() : null))
+  .then((d) => {
+    if (!d) return;
+    if (d.goalVault) document.getElementById("vault").value = d.goalVault;
+    if (d.goalWatcher) document.getElementById("watcher").value = d.goalWatcher;
+    if (d.demo?.goalId) document.getElementById("goalId").value = d.demo.goalId;
+    if (d.goalVault) load().catch(() => {});
+  })
+  .catch(() => {});
+</script>
+</body>
+</html>
